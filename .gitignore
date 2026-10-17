@@ -1,8 +1,0 @@
-**/__pycache__/*
-.DS_store
-.vscode
-TODO.txt
-images/
-logs/
-models/
-dist/

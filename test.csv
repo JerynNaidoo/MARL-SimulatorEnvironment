@@ -1,0 +1,6 @@
+Metric,Geometric Baseline (TCAS),Proposed MAPPO Model (Ours),Relative Advantage
+Mean Conflict Resolution Rate (%),26.93% ± 14.11,65.81% ± 13.82,+38.88% absolute gain
+Mean Separation Breaches per Sector,7.78 ± 1.42,4.00 ± 1.88,48.6% breach reduction
+Zero-Breach Mission Success Rate (%),0.0%,2.0%,+2.0% absolute gain
+Mean Flight Headway Efficiency (η),2.072,2.070,+-0.002 trajectory preservation
+Mean Decision Latency per Aircraft,0.01 ms,0.04 ms,Real-time compliant (< 5 ms)

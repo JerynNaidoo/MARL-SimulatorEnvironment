@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pygame
 
@@ -16,6 +18,7 @@ INTRUSION_PENALTY = -1
 NUM_INTRUDERS = 5
 NUM_WAYPOINTS = 1
 INTRUSION_DISTANCE = 5 # NM
+DEFAULT_AGENT_ID = 'KL001'
 
 WAYPOINT_DISTANCE_MIN = 100
 WAYPOINT_DISTANCE_MAX = 150
@@ -37,21 +40,26 @@ class HorizontalCREnv(gym.Env):
     """
     metadata = {"render_modes": ["rgb_array","human"], "render_fps": 120}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, scenario_file=None, agent_ids=None, num_intruders=None):
         self.window_width = 512
         self.window_height = 512
         self.window_size = (self.window_width, self.window_height) # Size of the rendered environment
 
+        self.scenario_file = scenario_file
+        self.num_intruders = NUM_INTRUDERS if num_intruders is None else num_intruders
+        self.agent_ids = [] if agent_ids is None else list(agent_ids)
+        self.intruder_ids = []
+        self.waypoints = {}
 
         # Observation space should include ownship and intruder info
         # Maybe later also have an option for CNN based intruder info, could be interesting
         self.observation_space = spaces.Dict(
             {
-                "intruder_distance": spaces.Box(-np.inf, np.inf, shape = (NUM_INTRUDERS,), dtype=np.float64),
-                "cos_difference_pos": spaces.Box(-np.inf, np.inf, shape = (NUM_INTRUDERS,), dtype=np.float64),
-                "sin_difference_pos": spaces.Box(-np.inf, np.inf, shape = (NUM_INTRUDERS,), dtype=np.float64),
-                "x_difference_speed": spaces.Box(-np.inf, np.inf, shape = (NUM_INTRUDERS,), dtype=np.float64),
-                "y_difference_speed": spaces.Box(-np.inf, np.inf, shape = (NUM_INTRUDERS,), dtype=np.float64),
+                "intruder_distance": spaces.Box(-np.inf, np.inf, shape = (self.num_intruders,), dtype=np.float64),
+                "cos_difference_pos": spaces.Box(-np.inf, np.inf, shape = (self.num_intruders,), dtype=np.float64),
+                "sin_difference_pos": spaces.Box(-np.inf, np.inf, shape = (self.num_intruders,), dtype=np.float64),
+                "x_difference_speed": spaces.Box(-np.inf, np.inf, shape = (self.num_intruders,), dtype=np.float64),
+                "y_difference_speed": spaces.Box(-np.inf, np.inf, shape = (self.num_intruders,), dtype=np.float64),
                 "waypoint_distance": spaces.Box(-np.inf, np.inf, shape = (NUM_WAYPOINTS,), dtype=np.float64),
                 "cos_drift": spaces.Box(-np.inf, np.inf, shape = (NUM_WAYPOINTS,), dtype=np.float64),
                 "sin_drift": spaces.Box(-np.inf, np.inf, shape = (NUM_WAYPOINTS,), dtype=np.float64)
@@ -80,17 +88,22 @@ class HorizontalCREnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
-        bs.traf.reset()
 
         self.total_reward = 0
         self.total_intrusions = 0
         self.average_drift = np.array([])
 
-        bs.traf.cre('KL001',actype="A320",acspd=AC_SPD)
+        if self.scenario_file is not None:
+            self._load_scenario()
+        else:
+            bs.traf.reset()
+            self._ensure_agents_exist()
+            self._generate_conflicts()
 
-        self._generate_conflicts()
-        self._generate_waypoint()
+        self._resolve_agent_ids()
+        self._ensure_agents_exist()
+        self._refresh_intruders()
+        self._generate_waypoints()
         observation = self._get_obs()
         info = self._get_info()
 
@@ -100,7 +113,6 @@ class HorizontalCREnv(gym.Env):
         return observation, info
     
     def step(self, action):
-        
         self._get_action(action)
 
         action_frequency = ACTION_FREQUENCY
@@ -123,93 +135,136 @@ class HorizontalCREnv(gym.Env):
 
         return observation, reward, terminated, False, info
 
-    def _generate_conflicts(self, acid = 'KL001'):
-        target_idx = bs.traf.id2idx(acid)
-        for i in range(NUM_INTRUDERS):
-            dpsi = np.random.randint(45,315)
-            cpa = np.random.randint(0,INTRUSION_DISTANCE)
-            tlosh = np.random.randint(100,1000)
-            bs.traf.creconfs(acid=f'{i}',actype="A320",targetidx=target_idx,dpsi=dpsi,dcpa=cpa,tlosh=tlosh)
+    def _load_scenario(self):
+        scenario_path = str(Path(self.scenario_file).expanduser())
+        if not Path(scenario_path).is_absolute():
+            scenario_path = str((Path.cwd() / scenario_path).resolve())
 
-    def _generate_waypoint(self, acid = 'KL001'):
-        self.wpt_lat = []
-        self.wpt_lon = []
-        self.wpt_reach = []
-        for i in range(NUM_WAYPOINTS):
-            wpt_dis_init = np.random.randint(WAYPOINT_DISTANCE_MIN, WAYPOINT_DISTANCE_MAX)
-            wpt_hdg_init = 0
+        bs.traf.reset()
+        bs.stack.stack(f'IC "{scenario_path}"')
 
-            ac_idx = bs.traf.id2idx(acid)
+    def _resolve_agent_ids(self):
+        if self.agent_ids:
+            return
 
-            wpt_lat, wpt_lon = fn.get_point_at_distance(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_dis_init, wpt_hdg_init)    
-            self.wpt_lat.append(wpt_lat)
-            self.wpt_lon.append(wpt_lon)
-            self.wpt_reach.append(0)
+        active_ids = [acid for acid in bs.traf.id if acid != '']
+        if DEFAULT_AGENT_ID in bs.traf.id:
+            self.agent_ids = [DEFAULT_AGENT_ID]
+        elif active_ids:
+            self.agent_ids = [active_ids[0]]
+        else:
+            self.agent_ids = [DEFAULT_AGENT_ID]
+
+        self.action_space = spaces.Box(-1, 1, shape=(len(self.agent_ids),), dtype=np.float64)
+
+    def _ensure_agents_exist(self):
+        for agent_id in self.agent_ids:
+            if agent_id not in bs.traf.id:
+                bs.traf.cre(agent_id, actype="A320", acspd=AC_SPD)
+
+        if not self.agent_ids:
+            raise RuntimeError("HorizontalCREnv requires at least one controlled aircraft.")
+
+    def _refresh_intruders(self):
+        self.intruder_ids = [acid for acid in bs.traf.id if acid not in set(self.agent_ids)]
+        if not self.intruder_ids:
+            self._generate_conflicts()
+            self.intruder_ids = [acid for acid in bs.traf.id if acid not in set(self.agent_ids)]
+
+    def _generate_conflicts(self):
+        if not self.agent_ids:
+            self._resolve_agent_ids()
+        for agent_id in self.agent_ids:
+            if agent_id not in bs.traf.id:
+                continue
+            target_idx = bs.traf.id2idx(agent_id)
+            for i in range(self.num_intruders):
+                dpsi = np.random.randint(45, 315)
+                cpa = np.random.randint(0, INTRUSION_DISTANCE)
+                tlosh = np.random.randint(100, 1000)
+                bs.traf.creconfs(acid=f'{agent_id}_{i}', actype="A320", targetidx=target_idx, dpsi=dpsi, dcpa=cpa, tlosh=tlosh)
+
+    def _generate_waypoints(self):
+        self.waypoints = {}
+        for agent_id in self.agent_ids:
+            self.waypoints[agent_id] = {"lat": [], "lon": [], "reach": []}
+            for i in range(NUM_WAYPOINTS):
+                wpt_dis_init = np.random.randint(WAYPOINT_DISTANCE_MIN, WAYPOINT_DISTANCE_MAX)
+                wpt_hdg_init = 0
+                ac_idx = bs.traf.id2idx(agent_id)
+                wpt_lat, wpt_lon = fn.get_point_at_distance(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_dis_init, wpt_hdg_init)
+                self.waypoints[agent_id]["lat"].append(wpt_lat)
+                self.waypoints[agent_id]["lon"].append(wpt_lon)
+                self.waypoints[agent_id]["reach"].append(0)
+
+    def _get_agent_obs(self, agent_id):
+        if agent_id not in bs.traf.id:
+            bs.traf.cre(agent_id, actype="A320", acspd=AC_SPD)
+
+        ac_idx = bs.traf.id2idx(agent_id)
+        intruder_distance = []
+        cos_bearing = []
+        sin_bearing = []
+        x_difference_speed = []
+        y_difference_speed = []
+        waypoint_distance = []
+        waypoint_qdrs = []
+        cos_drift = []
+        sin_drift = []
+        drift = []
+
+        ac_hdg = bs.traf.hdg[ac_idx]
+        for intruder_id in self.intruder_ids[:self.num_intruders]:
+            int_idx = bs.traf.id2idx(intruder_id)
+            int_qdr, int_dis = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[int_idx], bs.traf.lon[int_idx])
+            intruder_distance.append(int_dis * NM2KM)
+            bearing = ac_hdg - int_qdr
+            bearing = fn.bound_angle_positive_negative_180(bearing)
+            cos_bearing.append(np.cos(np.deg2rad(bearing)))
+            sin_bearing.append(np.sin(np.deg2rad(bearing)))
+            heading_difference = ac_hdg - bs.traf.hdg[int_idx]
+            x_dif = -np.cos(np.deg2rad(heading_difference)) * bs.traf.gs[int_idx]
+            y_dif = bs.traf.gs[ac_idx] - np.sin(np.deg2rad(heading_difference)) * bs.traf.gs[int_idx]
+            x_difference_speed.append(x_dif)
+            y_difference_speed.append(y_dif)
+
+        while len(intruder_distance) < self.num_intruders:
+            intruder_distance.append(0.0)
+            cos_bearing.append(0.0)
+            sin_bearing.append(0.0)
+            x_difference_speed.append(0.0)
+            y_difference_speed.append(0.0)
+
+        for lat, lon in zip(self.waypoints[agent_id]["lat"], self.waypoints[agent_id]["lon"]):
+            wpt_qdr, wpt_dis = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], lat, lon)
+            waypoint_distance.append(wpt_dis * NM2KM)
+            waypoint_qdrs.append(wpt_qdr)
+            drift_value = ac_hdg - wpt_qdr
+            drift_value = fn.bound_angle_positive_negative_180(drift_value)
+            drift.append(drift_value)
+            cos_drift.append(np.cos(np.deg2rad(drift_value)))
+            sin_drift.append(np.sin(np.deg2rad(drift_value)))
+
+        return {
+            "intruder_distance": np.array(intruder_distance) / WAYPOINT_DISTANCE_MAX,
+            "cos_difference_pos": np.array(cos_bearing),
+            "sin_difference_pos": np.array(sin_bearing),
+            "x_difference_speed": np.array(x_difference_speed) / AC_SPD,
+            "y_difference_speed": np.array(y_difference_speed) / AC_SPD,
+            "waypoint_distance": np.array(waypoint_distance) / WAYPOINT_DISTANCE_MAX,
+            "cos_drift": np.array(cos_drift),
+            "sin_drift": np.array(sin_drift),
+        }
 
     def _get_obs(self):
-        ac_idx = bs.traf.id2idx('KL001')
+        if not self.agent_ids:
+            self._resolve_agent_ids()
+            self._ensure_agents_exist()
 
-        self.intruder_distance = []
-        self.cos_bearing = []
-        self.sin_bearing = []
-        self.x_difference_speed = []
-        self.y_difference_speed = []
+        if len(self.agent_ids) == 1:
+            return self._get_agent_obs(self.agent_ids[0])
 
-        self.waypoint_distance = []
-        self.wpt_qdr = []
-        self.cos_drift = []
-        self.sin_drift = []
-        self.drift = []
-
-        self.ac_hdg = bs.traf.hdg[ac_idx]
-
-        for i in range(NUM_INTRUDERS):
-            int_idx = i+1
-            int_qdr, int_dis = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[int_idx], bs.traf.lon[int_idx])
-        
-            self.intruder_distance.append(int_dis * NM2KM)
-
-            bearing = self.ac_hdg - int_qdr
-            bearing = fn.bound_angle_positive_negative_180(bearing)
-
-            self.cos_bearing.append(np.cos(np.deg2rad(bearing)))
-            self.sin_bearing.append(np.sin(np.deg2rad(bearing)))
-
-            heading_difference = bs.traf.hdg[ac_idx] - bs.traf.hdg[int_idx]
-            x_dif = - np.cos(np.deg2rad(heading_difference)) * bs.traf.gs[int_idx]
-            y_dif = bs.traf.gs[ac_idx] - np.sin(np.deg2rad(heading_difference)) * bs.traf.gs[int_idx]
-
-            self.x_difference_speed.append(x_dif)
-            self.y_difference_speed.append(y_dif)
-
-
-        for lat, lon in zip(self.wpt_lat, self.wpt_lon):
-            
-            self.ac_hdg = bs.traf.hdg[ac_idx]
-            wpt_qdr, wpt_dis = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], lat, lon)
-        
-            self.waypoint_distance.append(wpt_dis * NM2KM)
-            self.wpt_qdr.append(wpt_qdr)
-
-            drift = self.ac_hdg - wpt_qdr
-            drift = fn.bound_angle_positive_negative_180(drift)
-
-            self.drift.append(drift)
-            self.cos_drift.append(np.cos(np.deg2rad(drift)))
-            self.sin_drift.append(np.sin(np.deg2rad(drift)))
-
-        observation = {
-                "intruder_distance": np.array(self.intruder_distance)/WAYPOINT_DISTANCE_MAX,
-                "cos_difference_pos": np.array(self.cos_bearing),
-                "sin_difference_pos": np.array(self.sin_bearing),
-                "x_difference_speed": np.array(self.x_difference_speed)/AC_SPD,
-                "y_difference_speed": np.array(self.y_difference_speed)/AC_SPD,
-                "waypoint_distance": np.array(self.waypoint_distance)/WAYPOINT_DISTANCE_MAX,
-                "cos_drift": np.array(self.cos_drift),
-                "sin_drift": np.array(self.sin_drift)
-            }
-        
-        return observation
+        return {agent_id: self._get_agent_obs(agent_id) for agent_id in self.agent_ids}
     
     def _get_info(self):
         # Here you implement any additional info that you want to return after a step,
@@ -222,56 +277,61 @@ class HorizontalCREnv(gym.Env):
         }
 
     def _get_reward(self):
+        total_reward = 0.0
+        for agent_id in self.agent_ids:
+            agent_reward = 0.0
+            reach_reward = self._check_waypoint(agent_id)
+            drift_reward = self._check_drift(agent_id)
+            intrusion_reward = self._check_intrusion(agent_id)
+            agent_reward = reach_reward + drift_reward + intrusion_reward
+            total_reward += agent_reward
 
-        # Always return done as false, as this is a non-ending scenario with 
-        # new waypoints spawning continously
-
-        reach_reward = self._check_waypoint()
-        drift_reward = self._check_drift()
-        intrusion_reward = self._check_intrusion()
-
-        total_reward = reach_reward + drift_reward + intrusion_reward
         self.total_reward += total_reward
 
-        if 0 in self.wpt_reach:
+        if any(self.waypoints[agent_id]["reach"].count(0) > 0 for agent_id in self.agent_ids):
             return total_reward, 0
-        else:
-            return total_reward, 1
+        return total_reward, 1
         
-    def _check_waypoint(self):
+    def _check_waypoint(self, agent_id):
         reward = 0
-        index = 0
-        for distance in self.waypoint_distance:
-            if distance < DISTANCE_MARGIN and self.wpt_reach[index] != 1:
-                self.wpt_reach[index] = 1
+        agent_waypoints = self.waypoints[agent_id]
+        for index, distance in enumerate(self._get_agent_obs(agent_id)["waypoint_distance"]):
+            if distance < DISTANCE_MARGIN / WAYPOINT_DISTANCE_MAX and agent_waypoints["reach"][index] != 1:
+                agent_waypoints["reach"][index] = 1
                 reward += REACH_REWARD
-                index += 1
-            else:
-                reward += 0
-                index += 1
         return reward
 
-    def _check_drift(self):
-        drift = abs(np.deg2rad(self.drift[0]))
+    def _check_drift(self, agent_id):
+        obs = self._get_agent_obs(agent_id)
+        drift = abs(np.deg2rad(obs["sin_drift"][0])) if len(obs["sin_drift"]) else 0.0
         self.average_drift = np.append(self.average_drift, drift)
         return drift * DRIFT_PENALTY
 
-    def _check_intrusion(self):
-        ac_idx = bs.traf.id2idx('KL001')
+    def _check_intrusion(self, agent_id):
+        ac_idx = bs.traf.id2idx(agent_id)
         reward = 0
-        for i in range(NUM_INTRUDERS):
-            int_idx = i+1
+        for intruder_id in self.intruder_ids[:self.num_intruders]:
+            int_idx = bs.traf.id2idx(intruder_id)
             _, int_dis = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[int_idx], bs.traf.lon[int_idx])
             if int_dis < INTRUSION_DISTANCE:
                 self.total_intrusions += 1
                 reward += INTRUSION_PENALTY
-        
         return reward
     
-    def _get_action(self,action):
-        action = self.ac_hdg + action * D_HEADING
-
-        bs.stack.stack(f"HDG KL001 {action[0]}")
+    def _get_action(self, action):
+        if not self.agent_ids:
+            self._resolve_agent_ids()
+        if np.isscalar(action):
+            action = np.array([float(action)], dtype=np.float64)
+        if len(action) != len(self.agent_ids):
+            action = np.resize(action, len(self.agent_ids))
+        for agent_id, action_value in zip(self.agent_ids, action):
+            if agent_id not in bs.traf.id:
+                continue
+            ac_idx = bs.traf.id2idx(agent_id)
+            current_heading = float(bs.traf.hdg[ac_idx])
+            heading = float(np.mod(current_heading + float(action_value) * D_HEADING, 360.0))
+            bs.stack.stack(f"HDG {agent_id} {heading}")
 
     def _render_frame(self):
         if self.window is None and self.render_mode == "human":
@@ -287,8 +347,12 @@ class HorizontalCREnv(gym.Env):
         canvas = pygame.Surface(self.window_size)
         canvas.fill((135,206,235))
 
+        render_agent_id = self.agent_ids[0] if self.agent_ids else DEFAULT_AGENT_ID
+        if render_agent_id not in bs.traf.id:
+            return
+
         # draw ownship
-        ac_idx = bs.traf.id2idx('KL001')
+        ac_idx = bs.traf.id2idx(render_agent_id)
         ac_length = 8
         heading_end_x = ((np.cos(np.deg2rad(bs.traf.hdg[ac_idx])) * ac_length)/max_distance)*self.window_width
         heading_end_y = ((np.sin(np.deg2rad(bs.traf.hdg[ac_idx])) * ac_length)/max_distance)*self.window_width
@@ -315,8 +379,8 @@ class HorizontalCREnv(gym.Env):
         # draw intruders
         ac_length = 3
 
-        for i in range(NUM_INTRUDERS):
-            int_idx = i+1
+        for intruder_id in self.intruder_ids[:NUM_INTRUDERS]:
+            int_idx = bs.traf.id2idx(intruder_id)
             int_hdg = bs.traf.hdg[int_idx]
             heading_end_x = ((np.cos(np.deg2rad(int_hdg)) * ac_length)/max_distance)*self.window_width
             heading_end_y = ((np.sin(np.deg2rad(int_hdg)) * ac_length)/max_distance)*self.window_width
@@ -363,8 +427,11 @@ class HorizontalCREnv(gym.Env):
             # code.interact(local=locals())
 
         # draw target waypoint
-        for qdr, dis, reach in zip(self.wpt_qdr, self.waypoint_distance, self.wpt_reach):
-
+        for qdr, dis, reach in zip(
+            self.waypoints.get(render_agent_id, {}).get("qdr", []),
+            self.waypoints.get(render_agent_id, {}).get("distance", []),
+            self.waypoints.get(render_agent_id, {}).get("reach", [])
+        ):
             circle_x = ((np.cos(np.deg2rad(qdr)) * dis)/max_distance)*self.window_width
             circle_y = ((np.sin(np.deg2rad(qdr)) * dis)/max_distance)*self.window_width
 
