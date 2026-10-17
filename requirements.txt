@@ -1,0 +1,20 @@
+# --- Core simulator + single-agent baseline environments -------------------
+# Installing bluesky-gym pulls in bluesky-simulator, gymnasium, numpy, pygame,
+# torch and stable-baselines3 automatically.
+bluesky-gym>=0.2.0
+
+# --- Multi-agent RL layer ---------------------------------------------------
+pettingzoo>=1.26.1
+supersuit>=3.11.0        # optional: standard PettingZoo preprocessing wrappers
+
+# --- MARL training ------------------------------------------------------
+# Verified against ray 2.56.0 (RLlib "new API stack", the current default).
+ray[rllib]>=2.56.0
+
+# NOTE (verified during setup): installing ray[rllib] into this same
+# environment will report it is *downgrading* gymnasium (e.g. 1.3.0 -> 1.2.2).
+# This is expected and does not break bluesky-gym, PettingZoo, or the custom
+# multi-agent environment in this project -- all were re-tested after the
+# downgrade and worked correctly. Install in the order shown in this file
+# (bluesky-gym, then pettingzoo/supersuit, then ray[rllib]) to reproduce the
+# tested combination.
