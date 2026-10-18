@@ -25,7 +25,7 @@ A Multi-Agent Reinforcement Learning (MARL) environment for air traffic manageme
 
 ## Overview
 
-Traditional air traffic simulators typically handle centralized or single-agent heuristics. This repository adapts the [BlueSky](https://github.com/ProfLoek/BlueSky) Open Air Traffic Simulator into a Gymnasium-compatible Multi-Agent RL environment (`bluesky_gym`).
+Traditional air traffic simulators typically handle centralized or single-agent heuristics. This repository adapts the BlueSky Open Air Traffic Simulator into a Gymnasium-compatible Multi-Agent RL environment (`bluesky_gym`).
 
 Multiple aircraft agents learn to safely navigate airspace, maintain required separation minima, avoid conflicts, and reach designated waypoints cooperatively.
 
