@@ -19,7 +19,6 @@ A Multi-Agent Reinforcement Learning (MARL) environment for air traffic manageme
   - [2. Model Training](#2-model-training)
   - [3. Scenario Generation & Visualization](#3-scenario-generation--visualization)
 - [Pre-trained Checkpoints & Benchmarks](#pre-trained-checkpoints--benchmarks)
-- [License](#license)
 - [Acknowledgments](#acknowledgments)
 
 ---
